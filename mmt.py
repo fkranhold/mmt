@@ -1,13 +1,13 @@
 import math
-import parse
 import subprocess
+import parse
 
 ## Set once and for all the mean-tone factor for equal temperament
 ET = math.log(2**(7/12)*2/3)/math.log(80/81)
 
 class Sound():
     def __init__(self, cscode: str, tempo: int=120):
-        self.csfile = "t 0 " + str(tempo) + "\n" + cscode + "e"
+        self.csfile = "t0 " + str(tempo) + "\n" + cscode + "e"
 
     @property
     def play(self):
@@ -17,38 +17,49 @@ class Sound():
                        shell = True,
                        capture_output = True,
                        executable="/bin/bash")
-        
-class Pair:
+
+class Tuple:
+    def __eq__(self, other):
+        return (self.v == other.v and type(self) == type(other))
+
+    def __hash__(self):
+        return hash(tuple(self.v))
+    
+class YZ(Tuple):
     def __init__(self, y: int, z: int=0):
         self.y = y  # the fifth        (2:3)
         self.z = z  # the ‘pure’ third (4:5)
         self.v = [self.y,self.z]
-        
-    def __eq__(self, other):
-        return (self.v == other.v and type(self) == type(other))
 
-    def __lt__(self, other):
-        return (self.y < other.y or (self.y == other.y and self.z < other.z))
-    
-class Triple(Pair):
+class XYZ(Tuple):
     def __init__(self, x: int, y: int, z: int=0):
-        super().__init__(y,z)
         self.x = x  # the octave       (1:2)
+        self.y = y  # the fifth        (2:3)
+        self.z = z  # the ‘pure’ third (4:5)
         self.v = [self.x,self.y,self.z]
 
-class Interval(Triple):
-    def __radd__(self, other):
-        return Interval(*[a+b for a,b in zip(self.v,other.v)])
-
-    def __sub__(self, other):
-        return Interval(*[a-b for a,b in zip(self.v,other.v)])
-
+class IntervalClass(YZ):
     def __rmul__(self, k: int):
-        return Interval(*[k*a for a in self.v])
+        return self.__class__(*[k*a for a in self.v])
 
     def __neg__(self):
-        return Interval(*[-a for a in self.v])
+        return self.__class__(*[-a for a in self.v])
+    
+    def __radd__(self, other):
+        return IntervalClass(self.y+other.y,
+                             self.z+other.z)
 
+    def __sub__(self, other):
+        return self+(-other)
+    
+class Interval(XYZ,IntervalClass):
+    def __radd__(self,other):
+        if (isinstance(other,Interval)):
+            return Interval(self.x+other.x,
+                            self.y+other.y,
+                            self.z+other.z)
+        else: return super().__radd__(other)
+    
     def ratio(self,mean: float=0) -> float:
         # whenever float is non-zero, it does not make
         # much sense to have z to be non-zero as well.
@@ -62,9 +73,29 @@ class Interval(Triple):
     def semitones(self) -> int:
         return 12*self.x + 7*self.y + 4*self.z
 
-    @property
-    def spn(self) -> str:
-        return str(1+abs(self.steps))
+    def __repr__(self) -> str:
+        # so far only gives meaningful results for z=0
+        # Is it worth writing something like "just maj 3" for
+        # the special cases of |y|≤1? That includes
+        # maj3 (4:5), maj6 (3:5), maj7 (8:15), up to octaves,
+        # so also the complementary min6 (5:8), min3 (5:6), min2 (15:16)
+        numsteps = str(1+abs(self.steps))
+        if self.steps == 0:
+            if self.y == 0: return "unison"
+            else:
+                chsteps = int(1/7*self.y)
+                return str(abs(chsteps)) + " chromatic step" + parse.plural(chsteps) + " " + parse.updown(self.y)
+        else:
+            sign = int(.5 - .5*math.copysign(1,self.y)*math.copysign(1,self.steps))
+            match abs(self.y):
+                case num if num > 5:
+                    size = ['aug','dim'][sign] + parse.supdex(math.floor((abs(self.y)+1)/7))
+                case num if num > 1:
+                    size = ['maj','min'][sign]
+                case _:
+                    size = 'pure'
+
+            return size + " " + numsteps + " " + parse.updown(self.steps)
 
 class Base(int):
     def __eq__(self,other):
@@ -84,7 +115,7 @@ class Comma(int):
     def __repr__(self):
         return parse.signed_char(self,"P","M")
 
-class PitchClass(Pair):
+class PitchClass(YZ):
     @classmethod
     def spn(cls, spn: str):
         base   = ord(spn[0])-65
@@ -113,14 +144,13 @@ class PitchClass(Pair):
     def __repr__(self) -> str:
         return str(self.base) + str(self.alter) + str(self.comma)
 
-    def __hash__(self):
-        return hash(tuple(self.v))
-
     def __sub__(self, other):
-        return Interval(0,self.y-other.y,self.z-other.z)
+        return IntervalClass(*[a-b for a,b in zip(self.v,other.v)])
 
+    def __lt__(self, other):
+        return (self.y < other.y or (self.y == other.y and self.z < other.z))
     
-class Pitch(Triple,PitchClass):
+class Pitch(XYZ,PitchClass):
     @property
     def octave(self) -> int:
         return 3+self.x-2*self.z+math.floor(4/7*(self.y+4*self.z+3))
@@ -133,12 +163,20 @@ class Pitch(Triple,PitchClass):
         x = [0,-1,1,0,-1,2,1]
         
         return cls(-4+octave-4*c.alter-2*c.comma+x[c.base%7],c.y,c.z)
-           
-    def __radd__(self, first: Interval):
-        return Pitch(*[a+b for a,b in zip(first.v,self.v)])
+
+    def __radd__(self, i: Interval):
+        if (isinstance(i,Interval)):
+            return Pitch(i.x+self.x,
+                         i.y+self.y,
+                         i.z+self.z)
+        else: return super().__radd__(i)
 
     def __sub__(self, other):
-        return Interval(*[a-b for a,b in zip(self.v,other.v)])
+        if (isinstance(other,Pitch)):
+            return Interval(self.x-other.x,
+                            self.y-other.y,
+                            self.z-other.z)
+        else: return super().__sub__(other)
 
     @property
     def chroma(self) -> int:
@@ -149,9 +187,6 @@ class Pitch(Triple,PitchClass):
 
     def __repr__(self) -> str:
         return str(self.base) + str(self.octave) + str(self.alter) + str(self.comma)
-
-    def __hash__(self):
-        return hash(tuple(self.v))
 
     def pclass(self) -> PitchClass:
         return PitchClass(self.y,self.z)
@@ -166,7 +201,7 @@ class ClassChord():
     def __eq__(self, other):
         return self.S == other.S
 
-    def __radd__(self, i: Interval):
+    def __radd__(self, i: IntervalClass):
         return self.__class__(*[i+k for k in self.S])
 
     def mirror(self, a: PitchClass):
@@ -208,36 +243,36 @@ class Triad(ClassChord):
     def __init__(self, *args: PitchClass):
         super().__init__(*args)
                 
-        if Interval(0,1,0)+min(self.S) in self.S:
+        if IntervalClass(1)+min(self.S) in self.S:
             self.root  = min(self.S)
             self.genus = Genus(0)
         else:
-            self.root  = Interval(0,-1,0)+max(self.S)
+            self.root  = IntervalClass(-1)+max(self.S)
             self.genus = Genus(1)
             
     @property
     def fifth(self):
-        return Interval(0,1,0)+self.root
+        return IntervalClass(1)+self.root
 
     @property
     def third(self):
         return min(self.S - {self.root, self.fifth})
     
     @property
-    def var(self):
+    def P(self):
         return Interval(0,1,0)+self.mirror(self.root)
 
-    def par_gar(self,w: int):
+    def RL(self,w: int):
         X = [self.root,self.fifth]
         return (self.third-X[(w+self.genus)%2]) + self.mirror(X[(w+self.genus)%2])
 
     @property
-    def par(self):
-        return self.par_gar(0)
+    def R(self):
+        return self.RL(0)
 
     @property
-    def gar(self):
-        return self.par_gar(1)
+    def L(self):
+        return self.RL(1)
 
     def __repr__(self):
-        return str(self.root) + " " + str(self.genus) + ": " + str(self.S)
+        return str(self.root) + " " + str(self.genus)
